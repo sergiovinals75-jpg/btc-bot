@@ -395,8 +395,6 @@ def main():
 
 if __name__=="__main__":
     main()
-```
 
-### Lo que verás ahora en cada mensaje:
-```
-🔴 4H: VENDE DEBIL · RSI 62 · Vol 1.8x 🔥 · Rango ACTIVO
+
+
