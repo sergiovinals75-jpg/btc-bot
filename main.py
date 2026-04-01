@@ -356,6 +356,13 @@ def main():
     log.info("── Descargando velas Binance...")
     try:
         candles_map = fetch_all_candles()
+        def fetch_price():
+    r = requests.get(
+        "https://api.binance.com/api/v3/ticker/price",
+        params={"symbol": "BTCUSDT"},
+        timeout=10
+    )
+    return float(r.json()["price"])
     except Exception as e:
         log.error(f"Error Binance: {e}"); return
 
