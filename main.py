@@ -24,7 +24,7 @@ TG_TOKEN   = os.environ.get("TG_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 STATE_FILE = Path("state.json")
 
-BINANCE_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
 
 LEN_RANGE   = 10
 SIZE_FACTOR = 1.5
