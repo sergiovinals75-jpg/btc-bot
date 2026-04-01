@@ -24,6 +24,7 @@ SIZE_FACTOR = 1.5
 CTX_LEN     = 5
 CTX_THRESH  = 0.5
 DAILY_HOUR  = 9
+VOL_PERIOD  = 20   # velas para calcular volumen medio
 
 TF_LABELS = {"15m": "15M", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
 TF_LIMITS = {"15m": 500,   "1h": 500,  "4h": 300,  "1d": 200,  "1w": 100}
@@ -75,6 +76,14 @@ def calc_atr(candles, n=14):
     if len(candles) < n+1: return None
     r = candles[-(n+1):]
     return sum(max(r[i]["high"]-r[i]["low"], abs(r[i]["high"]-r[i-1]["close"]), abs(r[i]["low"]-r[i-1]["close"])) for i in range(1,n+1)) / n
+
+def calc_volume_ratio(candles, period=VOL_PERIOD):
+    """Ratio entre volumen actual y media de las ultimas N velas. >1 = volumen alto."""
+    if len(candles) < period+1: return None
+    vols = [c["volume"] for c in candles]
+    avg  = sum(vols[-(period+1):-1]) / period
+    if avg == 0: return None
+    return vols[-1] / avg
 
 def is_big_candle(candles, idx, length, factor):
     if idx < length: return False
@@ -156,11 +165,13 @@ def compute_signal(candles_map, tf_key):
     last   = states[-1]
     rsi    = calc_rsi(closes, 14)[-1]
     atr    = calc_atr(candles, 14)
+    vol_ratio = calc_volume_ratio(candles)
     sc=[]; tot=0
 
     def add(name,s,ms,label,color):
         nonlocal tot; sc.append({"name":name,"score":s,"max":ms,"label":label,"color":color}); tot+=s
 
+    # ── Zona ──
     if last["in"] and last["hi"]:
         if   last["phase"]==1 and last["retest_buy"]:  add("Zona",3,3,"Retest COMPRA confirmado","green")
         elif last["phase"]==1 and last["went_below"]:  add("Zona",2,3,"Toco zona baja","green")
@@ -171,6 +182,7 @@ def compute_signal(candles_map, tf_key):
         else:                                           add("Zona",0,3,"Sin fase","yellow")
     else: add("Zona",0,3,"Sin rango activo","yellow")
 
+    # ── RSI ──
     if rsi is not None:
         if   rsi<30:  add("RSI",3,3,f"RSI {rsi:.1f} Sobreventa extrema","green")
         elif rsi<45:  add("RSI",2,3,f"RSI {rsi:.1f} Presion compradora","green")
@@ -179,6 +191,24 @@ def compute_signal(candles_map, tf_key):
         elif rsi<80:  add("RSI",-2,3,f"RSI {rsi:.1f} Sobrecompra","red")
         else:         add("RSI",-3,3,f"RSI {rsi:.1f} Sobrecompra extrema","red")
 
+    # ── Volumen ──
+    if vol_ratio is not None:
+        cur_bias = 1 if last["phase"]==1 else (-1 if last["phase"]==2 else 0)
+        if vol_ratio >= 1.5:
+            # Volumen muy alto: confirma o advierte segun sesgo
+            if cur_bias != 0:
+                add("Vol",2,2,f"Volumen {vol_ratio:.1f}x — Confirma movimiento","green")
+            else:
+                add("Vol",1,2,f"Volumen {vol_ratio:.1f}x — Alto sin sesgo claro","yellow")
+        elif vol_ratio >= 1.2:
+            add("Vol",1,2,f"Volumen {vol_ratio:.1f}x — Por encima de la media","green")
+        elif vol_ratio < 0.8 and last["in"]:
+            # Volumen bajo con senal activa: resta fiabilidad
+            add("Vol",-1,2,f"Volumen {vol_ratio:.1f}x — Bajo, senal debil","red")
+        else:
+            add("Vol",0,2,f"Volumen {vol_ratio:.1f}x — Normal","yellow")
+
+    # ── MTF ──
     biases   = [calc_bias(v) for k,v in candles_map.items() if k in TF_LABELS]
     cur_bias = 1 if last["phase"]==1 else (-1 if last["phase"]==2 else 0)
     active_b = [b for b in biases if b["bias"]!=0]
@@ -190,6 +220,7 @@ def compute_signal(candles_map, tf_key):
         elif ratio==0:    add("MTF",-2,2,"Divergencia MTF","red")
         else:             add("MTF",-1,2,"Alineacion debil","yellow")
 
+    # ── Contexto y Fuerza ──
     if last["in"]:
         add("Contexto",1 if last["is_cont"] else -1,1,"Continuacion" if last["is_cont"] else "Posible reversion","green")
         touches = last["touches_lo"] if last["phase"]==1 else last["touches_hi"]
@@ -212,7 +243,7 @@ def compute_signal(candles_map, tf_key):
     else:                           action,css = "ESPERA","neutral"
 
     return {"action":action,"css":css,"tot":tot,"max_s":max_s,"price":price,
-            "dt_utc":dt_utc,"rsi":rsi,"atr":atr,"range_state":last}
+            "dt_utc":dt_utc,"rsi":rsi,"atr":atr,"vol_ratio":vol_ratio,"range_state":last}
 
 
 def calc_confluence(sigs):
@@ -250,11 +281,20 @@ def tg_send(text):
 def fmt_price(p):
     return f"{p:,.2f}".replace(",","X").replace(".",",").replace("X",".")
 
+def vol_emoji(vol_ratio):
+    if vol_ratio is None:    return ""
+    if vol_ratio >= 1.5:     return " 🔥"
+    if vol_ratio >= 1.2:     return " ⬆️"
+    if vol_ratio < 0.8:      return " ⬇️"
+    return ""
+
 def build_tf_block(tf, s):
     em={"buy":"🟢","sell":"🔴","wait":"⬜","neutral":"🟡"}.get(s["css"],"🟡")
     rsi_txt=f" · RSI {s['rsi']:.0f}" if s["rsi"] is not None else ""
     rng_txt=" · Rango ACTIVO" if s["range_state"]["in"] else ""
+    vol_txt=f" · Vol {s['vol_ratio']:.1f}x{vol_emoji(s['vol_ratio'])}" if s.get("vol_ratio") else ""
     price_f=fmt_price(s["price"])
+
     if s["atr"] and s["css"] in ("buy","sell"):
         is_buy=s["css"]=="buy"
         sl=s["price"]-s["atr"] if is_buy else s["price"]+s["atr"]
@@ -265,9 +305,13 @@ def build_tf_block(tf, s):
         lvls=f"   🛑 SL: ${round(sl):,} ({ds}{sl_pct:.2f}%)\n   🎯 TP: ${round(tp):,} ({dt}{tp_pct:.2f}%)".replace(",",".")
     else:
         lvls="   🟡 Sin niveles activos"
+
     rs=s["range_state"]
     rng_line=f"   📐 Rango: ${round(rs['lo']):,} - ${round(rs['hi']):,}\n".replace(",",".") if rs.get("in") and rs.get("hi") else ""
-    return f"{em} <b>{TF_LABELS[tf]}:</b> {s['action']}{rsi_txt}{rng_txt}\n   💰 Precio: <b>${price_f}</b>\n{rng_line}{lvls}"
+
+    return (f"{em} <b>{TF_LABELS[tf]}:</b> {s['action']}{rsi_txt}{vol_txt}{rng_txt}\n"
+            f"   💰 Precio: <b>${price_f}</b>\n"
+            f"{rng_line}{lvls}")
 
 def build_alert_message(sigs, changed_tfs):
     ref=sigs.get("15m") or next(iter(sigs.values()),None)
@@ -321,7 +365,8 @@ def main():
         s=compute_signal(candles_map,tf)
         if s:
             sigs[tf]=s
-            log.info(f"  {TF_LABELS[tf]}: {s['action']}  score={s['tot']:+d}  RSI={s['rsi']:.1f}")
+            vol_info=f"  Vol:{s['vol_ratio']:.2f}x" if s.get("vol_ratio") else ""
+            log.info(f"  {TF_LABELS[tf]}: {s['action']}  score={s['tot']:+d}  RSI={s['rsi']:.1f}{vol_info}")
 
     now_es=now_spain(); today_str=now_es.strftime("%Y-%m-%d"); sent_daily=False
 
@@ -350,3 +395,8 @@ def main():
 
 if __name__=="__main__":
     main()
+```
+
+### Lo que verás ahora en cada mensaje:
+```
+🔴 4H: VENDE DEBIL · RSI 62 · Vol 1.8x 🔥 · Rango ACTIVO
