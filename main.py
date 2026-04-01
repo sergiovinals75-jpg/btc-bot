@@ -31,8 +31,8 @@ SIZE_FACTOR = 1.5
 CTX_LEN     = 5
 CTX_THRESH  = 0.5
 
-TF_LABELS = {"15m": "15M", "1h": "1H", "4h": "4H", "1d": "1D"}
-TF_LIMITS = {"15m": 500,   "1h": 500,  "4h": 300,  "1d": 200}
+TF_LABELS = {"15m": "15M", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
+TF_LIMITS = {"15m": 500,   "1h": 500,  "4h": 300,  "1d": 200,  "1w": 100}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +51,7 @@ def load_state() -> dict:
             return json.loads(STATE_FILE.read_text())
         except Exception:
             pass
-    return {"15m": None, "1h": None, "4h": None, "1d": None}
+    return {"15m": None, "1h": None, "4h": None, "1d": None, "1w": None}
 
 
 def save_state(state: dict):
@@ -350,47 +350,73 @@ def tg_send(text):
     return r.json().get("ok", False)
 
 
+def fmt_price(p):
+    return f"{p:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def build_tf_block(tf, s, label):
+    """Construye el bloque de un timeframe con su señal, RSI, rango y niveles propios."""
+    em_map = {
+        "buy":     "🟢",
+        "sell":    "🔴",
+        "wait":    "⬜",
+        "neutral": "🟡",
+    }
+    em = em_map.get(s["css"], "🟡")
+
+    rsi_txt  = f" · RSI {s['rsi']:.0f}" if s["rsi"] is not None else ""
+    rng_txt  = " · Rango ACTIVO" if s["range_state"]["in"] else ""
+    price_f  = fmt_price(s["price"])
+
+    # SL / TP propios de este timeframe
+    if s["atr"] and s["css"] in ("buy", "sell"):
+        is_buy = s["css"] == "buy"
+        sl = s["price"] - s["atr"] if is_buy else s["price"] + s["atr"]
+        tp = s["price"] + s["atr"] * 1.5 if is_buy else s["price"] - s["atr"] * 1.5
+        sl_pct = abs(sl - s["price"]) / s["price"] * 100
+        tp_pct = abs(tp - s["price"]) / s["price"] * 100
+        dir_sl = "-" if is_buy else "+"
+        dir_tp = "+" if is_buy else "-"
+        sl_line = f"🛑 SL: ${round(sl):,} ({dir_sl}{sl_pct:.2f}%)".replace(",", ".")
+        tp_line = f"🎯 TP: ${round(tp):,} ({dir_tp}{tp_pct:.2f}%)".replace(",", ".")
+        lvls = f"   {sl_line}\n   {tp_line}"
+    else:
+        lvls = "   🟡 Sin niveles activos"
+
+    # Rango del timeframe
+    rs = s["range_state"]
+    rng_line = ""
+    if rs.get("in") and rs.get("hi"):
+        rng_line = f"   📐 Rango: ${round(rs['lo']):,} → ${round(rs['hi']):,}\n".replace(",", ".")
+
+    return (
+        f"{em} <b>{label}:</b> {s['action']}{rsi_txt}{rng_txt}\n"
+        f"   💰 Precio: <b>${price_f}</b>\n"
+        f"{rng_line}"
+        f"{lvls}"
+    )
+
+
 def build_message(sigs, changed_tfs):
-    def em(a):
-        return "🟢" if "COMPRA" in a else "🔴" if "VENDE" in a else "⬜" if a == "SIN RANGO" else "🟡"
-
-    best = sigs.get("15m") or next(iter(sigs.values()), None)
-    sl_line = tp_line = "—"
-    if best and best["atr"] and best["css"] in ("buy", "sell"):
-        is_buy  = best["css"] == "buy"
-        sl      = best["price"] - best["atr"] if is_buy else best["price"] + best["atr"]
-        tp      = best["price"] + best["atr"] * 1.5 if is_buy else best["price"] - best["atr"] * 1.5
-        sl_line = f"${round(sl):,} (-{best['atr']/best['price']*100:.2f}%)".replace(",",".")
-        tp_line = f"${round(tp):,} (+{best['atr']*1.5/best['price']*100:.2f}%)".replace(",",".")
-
-    price_f = f"{best['price']:,.2f}".replace(",","X").replace(".","," ).replace("X",".") if best else "—"
-    dt_sp   = utc_to_spain(best["dt_utc"]) if best else datetime.now()
-    fecha   = dt_sp.strftime("%d/%m %H:%M") + "h España"
+    # Fecha/hora España del primer timeframe disponible
+    ref = sigs.get("15m") or next(iter(sigs.values()), None)
+    dt_sp = utc_to_spain(ref["dt_utc"]) if ref else datetime.now()
+    fecha = dt_sp.strftime("%d/%m %H:%M") + "h España"
     changed = ", ".join(TF_LABELS[t] for t in changed_tfs)
 
-    lines = []
-    for tf in ("15m", "1h", "4h", "1d"):
+    blocks = []
+    for tf in ("15m", "1h", "4h", "1d", "1w"):
         s = sigs.get(tf)
-        if not s: continue
-        rsi_txt = f" · RSI:{s['rsi']:.0f}" if s["rsi"] is not None else ""
-        rng_txt = " · Rango ACTIVO" if s["range_state"]["in"] else ""
-        lines.append(f"{em(s['action'])} <b>{TF_LABELS[tf]}:</b> {s['action']}{rsi_txt}{rng_txt}")
-
-    rs   = best["range_state"] if best else {}
-    fib  = (f"📐 Rango: ${round(rs['lo']):,} → ${round(rs['hi']):,}\n".replace(",",".")
-            if best and rs.get("in") and rs.get("hi") else "")
-    lvls = (f"🛑 Stop Loss: {sl_line}\n🎯 Take Profit: {tp_line}\n"
-            if best and best["css"] in ("buy","sell") else "🟡 Sin niveles activos\n")
+        if not s:
+            continue
+        blocks.append(build_tf_block(tf, s, TF_LABELS[tf]))
 
     return (
         f"📡 <b>ACTIVE RANGE — Cambio de señal</b>\n"
         f"<i>Actualizado: {changed}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        + "\n".join(lines) + "\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Precio: <b>${price_f}</b>\n"
-        f"{fib}{lvls}"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n━━━━━━━━━━━━━━━━━━━━\n".join(blocks) +
+        f"\n━━━━━━━━━━━━━━━━━━━━\n"
         f"<i>🕐 {fecha}</i>"
     )
 
