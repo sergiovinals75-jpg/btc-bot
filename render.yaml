@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: btc-active-range-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TG_TOKEN
+        sync: false       # lo introduces tú a mano en el dashboard de Render
+      - key: TG_CHAT_ID
+        sync: false
