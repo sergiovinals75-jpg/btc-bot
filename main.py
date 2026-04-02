@@ -21,7 +21,7 @@ BINANCE_URL  = "https://data-api.binance.vision/api/v3/klines"
 BINANCE_TICK = "https://data-api.binance.vision/api/v3/ticker/price"
 
 LEN_RANGE   = 10
-SIZE_FACTOR = 1.5
+SIZE_FACTOR = 1.0
 CTX_LEN     = 5
 CTX_THRESH  = 0.5
 DAILY_HOUR  = 9
