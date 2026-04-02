@@ -533,12 +533,4 @@ if __name__=="__main__":
     main()
 
 
-### Así verás el mensaje ahora:
 
-
-
-"🟢" Probabilidad de exito: 78%
-" ████████░░ " Alta
-Direccion dominante: COMPRA "📈"
-
-"🟢" Confluencia: Alcista  3/5 TFs...
