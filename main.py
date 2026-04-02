@@ -537,8 +537,8 @@ if __name__=="__main__":
 ```
  ACTIVE RANGE  Cambio de senal
 
-🟢 Probabilidad de exito: 78%
+"🟢" Probabilidad de exito: 78%
 ████████░░ Alta
 Direccion dominante: COMPRA 📈
 
-🟢 Confluencia: Alcista  3/5 TFs...
+"🟢" Confluencia: Alcista  3/5 TFs...
