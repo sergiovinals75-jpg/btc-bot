@@ -21,14 +21,18 @@ BINANCE_URL  = "https://data-api.binance.vision/api/v3/klines"
 BINANCE_TICK = "https://data-api.binance.vision/api/v3/ticker/price"
 
 LEN_RANGE   = 10
-SIZE_FACTOR = 1.0
+SIZE_FACTOR = 1.5
 CTX_LEN     = 5
 CTX_THRESH  = 0.5
 DAILY_HOUR  = 9
 VOL_PERIOD  = 20
 
+TF_ORDER  = ["15m", "1h", "4h", "1d", "1w"]
 TF_LABELS = {"15m": "15M", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
 TF_LIMITS = {"15m": 500,   "1h": 500,  "4h": 300,  "1d": 200,  "1w": 100}
+
+# Peso de cada TF en el calculo de probabilidad (mayor TF = mas peso)
+TF_WEIGHTS = {"15m": 1, "1h": 2, "4h": 3, "1d": 4, "1w": 5}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger(__name__)
@@ -39,11 +43,13 @@ def load_state():
         try:
             d = json.loads(STATE_FILE.read_text())
             if "signals" in d:
+                for tf in TF_ORDER:
+                    d["signals"].setdefault(tf, None)
                 return d
-            return {"signals": d, "last_daily": None}
+            return {"signals": {tf: None for tf in TF_ORDER}, "last_daily": None}
         except Exception:
             pass
-    return {"signals": {"15m": None, "1h": None, "4h": None, "1d": None, "1w": None}, "last_daily": None}
+    return {"signals": {tf: None for tf in TF_ORDER}, "last_daily": None}
 
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2))
@@ -156,7 +162,6 @@ def calc_bias(candles):
     return {"bias": 1 if last["phase"]==1 else (-1 if last["phase"]==2 else 0)}
 
 def fetch_current_price():
-    """Obtiene el precio actual real de BTC, no el de la ultima vela cerrada."""
     try:
         r = requests.get(BINANCE_TICK, params={"symbol": "BTCUSDT"}, timeout=10)
         r.raise_for_status()
@@ -169,10 +174,7 @@ def compute_signal(candles_map, tf_key, current_price=None):
     candles = candles_map.get(tf_key)
     if not candles or len(candles) < LEN_RANGE+5: return None
     closes = [c["close"] for c in candles]
-
-    # ✅ FIX 1: usar precio real si está disponible, si no el de la ultima vela
-    price = current_price if current_price is not None else closes[-1]
-
+    price  = current_price if current_price is not None else closes[-1]
     states = detect_active_range(candles, LEN_RANGE, SIZE_FACTOR)
     last   = states[-1]
     rsi    = calc_rsi(closes, 14)[-1]
@@ -246,6 +248,110 @@ def compute_signal(candles_map, tf_key, current_price=None):
             "rsi":rsi,"atr":atr,"vol_ratio":vol_ratio,"range_state":last}
 
 
+# ─────────────────────────────────────────────
+# PROBABILIDAD DE EXITO
+# ─────────────────────────────────────────────
+def calc_probability(sigs):
+    """
+    Calcula probabilidad de exito ponderada por:
+    - Score normalizado de cada TF (pesos mayores a TFs mayores)
+    - Confluencia entre TFs
+    - Volumen
+    - RSI en zona correcta
+    - Retest confirmado
+    Devuelve: (prob_int, direccion, label, barra)
+    """
+    if not sigs: return 50, "neutral", "Sin datos", "░░░░░░░░░░"
+
+    # Direccion dominante
+    n_buy  = sum(1 for s in sigs.values() if s["css"] in ("buy",))
+    n_sell = sum(1 for s in sigs.values() if s["css"] in ("sell",))
+    if n_buy == 0 and n_sell == 0:
+        return 50, "neutral", "Sin direccion clara", "░░░░░░░░░░"
+    direction = "buy" if n_buy >= n_sell else "sell"
+
+    # Score ponderado por TF
+    total_weight = 0
+    weighted_score = 0
+    for tf, s in sigs.items():
+        w = TF_WEIGHTS.get(tf, 1)
+        total_weight += w
+        max_s = s["max_s"] if s["max_s"] > 0 else 1
+        norm = (s["tot"] + max_s) / (max_s * 2) * 100
+        # Si va en contra de la direccion dominante penalizar
+        if direction == "buy"  and s["css"] == "sell": norm = 100 - norm
+        if direction == "sell" and s["css"] == "buy":  norm = 100 - norm
+        weighted_score += norm * w
+
+    prob = weighted_score / total_weight if total_weight > 0 else 50
+
+    # Bonus/penalizacion por volumen (max +-6 puntos)
+    vol_adj = 0
+    for s in sigs.values():
+        vr = s.get("vol_ratio")
+        if vr is None: continue
+        if   vr >= 1.5: vol_adj += 2
+        elif vr >= 1.2: vol_adj += 1
+        elif vr < 0.8:  vol_adj -= 2
+    vol_adj = max(-6, min(6, vol_adj))
+    prob += vol_adj
+
+    # Bonus por RSI en zona correcta (max +-4 puntos)
+    rsi_adj = 0
+    for s in sigs.values():
+        rsi = s.get("rsi")
+        if rsi is None: continue
+        if direction == "buy":
+            if   rsi < 30: rsi_adj += 2
+            elif rsi < 45: rsi_adj += 1
+            elif rsi > 70: rsi_adj -= 2
+        else:
+            if   rsi > 70: rsi_adj += 2
+            elif rsi > 55: rsi_adj += 1
+            elif rsi < 30: rsi_adj -= 2
+    rsi_adj = max(-4, min(4, rsi_adj))
+    prob += rsi_adj
+
+    # Bonus por retest confirmado (el mejor escenario posible)
+    for s in sigs.values():
+        rs = s.get("range_state", {})
+        if direction == "buy"  and rs.get("retest_buy"):  prob += 5; break
+        if direction == "sell" and rs.get("retest_sell"): prob += 5; break
+
+    # Penalizacion por divergencia entre TFs
+    if n_buy > 0 and n_sell > 0:
+        prob -= min(n_buy, n_sell) * 3
+
+    # Clamp entre 10% y 95%
+    prob = max(10, min(95, round(prob)))
+
+    # Etiqueta
+    if   prob >= 80: label = "Muy Alta"
+    elif prob >= 65: label = "Alta"
+    elif prob >= 50: label = "Media"
+    elif prob >= 35: label = "Baja"
+    else:            label = "Muy Baja"
+
+    # Barra visual (10 bloques)
+    filled = round(prob / 10)
+    barra  = "█" * filled + "░" * (10 - filled)
+
+    return prob, direction, label, barra
+
+
+def prob_header(sigs):
+    """Bloque de probabilidad para poner al inicio del mensaje."""
+    prob, direction, label, barra = calc_probability(sigs)
+    if   prob >= 80: em = "🟢"
+    elif prob >= 65: em = "🟡"
+    elif prob >= 50: em = "🟠"
+    else:            em = "🔴"
+    dir_txt = "COMPRA 📈" if direction == "buy" else ("VENTA 📉" if direction == "sell" else "NEUTRAL")
+    return (f"{em} <b>Probabilidad de exito: {prob}%</b>\n"
+            f"<code>{barra}</code> {label}\n"
+            f"Direccion dominante: <b>{dir_txt}</b>")
+
+
 def calc_confluence(sigs):
     n_buy=n_sell=n_wait=n_none=0
     for s in sigs.values():
@@ -266,7 +372,8 @@ def calc_confluence(sigs):
 
 def fetch_all_candles():
     data={}
-    for tf,limit in TF_LIMITS.items():
+    for tf in TF_ORDER:
+        limit = TF_LIMITS[tf]
         r=requests.get(BINANCE_URL,params={"symbol":"BTCUSDT","interval":tf,"limit":limit},timeout=15)
         r.raise_for_status()
         data[tf]=[{"ts":int(k[0]),"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])} for k in r.json()]
@@ -282,10 +389,10 @@ def fmt_price(p):
     return f"{p:,.2f}".replace(",","X").replace(".",",").replace("X",".")
 
 def vol_emoji(vol_ratio):
-    if vol_ratio is None:    return ""
-    if vol_ratio >= 1.5:     return " 🔥"
-    if vol_ratio >= 1.2:     return " ⬆️"
-    if vol_ratio < 0.8:      return " ⬇️"
+    if vol_ratio is None: return ""
+    if vol_ratio >= 1.5:  return " 🔥"
+    if vol_ratio >= 1.2:  return " ⬆️"
+    if vol_ratio < 0.8:   return " ⬇️"
     return ""
 
 def build_tf_block(tf, s):
@@ -311,31 +418,39 @@ def build_tf_block(tf, s):
             f"{rng_line}{lvls}")
 
 def build_alert_message(sigs, changed_tfs):
-    # ✅ FIX 2: usar hora real, no la de la vela
-    fecha = now_spain().strftime("%d/%m %H:%M") + "h"
-    changed=", ".join(TF_LABELS[t] for t in changed_tfs)
-    conf_em,conf_txt,n_buy,n_sell,n_wait,n_none=calc_confluence(sigs)
-    blocks=[build_tf_block(tf,sigs[tf]) for tf in ("15m","1h","4h","1d","1w") if sigs.get(tf)]
-    return (f"📡 <b>ACTIVE RANGE — Cambio de senal</b>\n<i>Actualizado: {changed}</i>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"{conf_em} <b>Confluencia:</b> {conf_txt}\n"
-            f"📊 Compra:{n_buy}  Venta:{n_sell}  Espera:{n_wait}  Sin rango:{n_none}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            + "\n━━━━━━━━━━━━━━━━━━━━\n".join(blocks)
-            + f"\n━━━━━━━━━━━━━━━━━━━━\n<i>Hora Espana: {fecha}</i>")
+    fecha  = now_spain().strftime("%d/%m %H:%M") + "h"
+    changed = ", ".join(TF_LABELS[t] for t in TF_ORDER if t in changed_tfs)
+    conf_em,conf_txt,n_buy,n_sell,n_wait,n_none = calc_confluence(sigs)
+    blocks = [build_tf_block(tf,sigs[tf]) for tf in TF_ORDER if sigs.get(tf)]
+    return (
+        f"📡 <b>ACTIVE RANGE — Cambio de senal</b>\n"
+        f"<i>Cambiaron: {changed}</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{prob_header(sigs)}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{conf_em} <b>Confluencia:</b> {conf_txt}\n"
+        f"📊 Compra:{n_buy}  Venta:{n_sell}  Espera:{n_wait}  Sin rango:{n_none}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n━━━━━━━━━━━━━━━━━━━━\n".join(blocks)
+        + f"\n━━━━━━━━━━━━━━━━━━━━\n<i>Hora Espana: {fecha}</i>"
+    )
 
 def build_daily_message(sigs):
-    # ✅ FIX 2: usar hora real, no la de la vela
     fecha = now_spain().strftime("%d/%m/%Y")
-    conf_em,conf_txt,n_buy,n_sell,n_wait,n_none=calc_confluence(sigs)
-    blocks=[build_tf_block(tf,sigs[tf]) for tf in ("15m","1h","4h","1d","1w") if sigs.get(tf)]
-    return (f"☀️ <b>RESUMEN DIARIO — {fecha}</b>\n<i>BTC Active Range Bot · 9:00h Espana</i>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"{conf_em} <b>Confluencia:</b> {conf_txt}\n"
-            f"📊 Compra:{n_buy}  Venta:{n_sell}  Espera:{n_wait}  Sin rango:{n_none}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            + "\n━━━━━━━━━━━━━━━━━━━━\n".join(blocks)
-            + f"\n━━━━━━━━━━━━━━━━━━━━\n<i>Proximo resumen manana a las 9:00h</i>")
+    conf_em,conf_txt,n_buy,n_sell,n_wait,n_none = calc_confluence(sigs)
+    blocks = [build_tf_block(tf,sigs[tf]) for tf in TF_ORDER if sigs.get(tf)]
+    return (
+        f"☀️ <b>RESUMEN DIARIO — {fecha}</b>\n"
+        f"<i>BTC Active Range Bot · 9:00h Espana</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{prob_header(sigs)}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{conf_em} <b>Confluencia:</b> {conf_txt}\n"
+        f"📊 Compra:{n_buy}  Venta:{n_sell}  Espera:{n_wait}  Sin rango:{n_none}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n━━━━━━━━━━━━━━━━━━━━\n".join(blocks)
+        + f"\n━━━━━━━━━━━━━━━━━━━━\n<i>Proximo resumen manana a las 9:00h</i>"
+    )
 
 
 def main():
@@ -354,7 +469,6 @@ def main():
     except Exception as e:
         log.error(f"Error Binance: {e}"); return
 
-    # ✅ FIX 1: obtener precio actual real
     log.info("── Obteniendo precio actual...")
     current_price = fetch_current_price()
     if current_price:
@@ -364,12 +478,31 @@ def main():
 
     log.info("── Calculando senales...")
     sigs={}
-    for tf in TF_LABELS:
-        s=compute_signal(candles_map, tf, current_price)
-        if s:
-            sigs[tf]=s
-            vol_info=f"  Vol:{s['vol_ratio']:.2f}x" if s.get("vol_ratio") else ""
-            log.info(f"  {TF_LABELS[tf]}: {s['action']}  score={s['tot']:+d}  RSI={s['rsi']:.1f}{vol_info}")
+    for tf in TF_ORDER:
+        try:
+            s=compute_signal(candles_map, tf, current_price)
+            if s:
+                sigs[tf]=s
+                vol_info=f"  Vol:{s['vol_ratio']:.2f}x" if s.get("vol_ratio") else ""
+                log.info(f"  {TF_LABELS[tf]}: {s['action']}  score={s['tot']:+d}  RSI={s['rsi']:.1f}{vol_info}")
+        except Exception as e:
+            log.error(f"  Error calculando {TF_LABELS[tf]}: {e}")
+
+    # Log probabilidad
+    prob, direction, label, _ = calc_probability(sigs)
+    log.info(f"── Probabilidad: {prob}% ({label}) direccion={direction}")
+
+    # Detectar cambios en TODOS los timeframes
+    changed=[]
+    for tf in TF_ORDER:
+        if tf in sigs:
+            prev = last_signals.get(tf)
+            curr = sigs[tf]["action"]
+            if curr != prev:
+                changed.append(tf)
+                log.info(f"  CAMBIO {TF_LABELS[tf]}: {prev} → {curr}")
+            else:
+                log.info(f"  SIN CAMBIO {TF_LABELS[tf]}: {curr}")
 
     now_es=now_spain(); today_str=now_es.strftime("%Y-%m-%d"); sent_daily=False
 
@@ -381,15 +514,15 @@ def main():
         else:
             log.error("── Error enviando resumen diario.")
 
-    changed=[tf for tf,s in sigs.items() if s["action"]!=last_signals.get(tf)]
     if not changed:
-        log.info("── Sin cambios. Fin.")
+        log.info("── Sin cambios en ningun TF. Fin.")
         if sent_daily: save_state(state)
         return
 
-    log.info(f"── Cambio en: {[TF_LABELS[t] for t in changed]}")
-    if tg_send(build_alert_message(sigs,changed)):
-        state["signals"]={**last_signals,**{tf:sigs[tf]["action"] for tf in changed}}
+    log.info(f"── Cambios detectados en: {[TF_LABELS[t] for t in changed]}")
+    if tg_send(build_alert_message(sigs, changed)):
+        for tf in changed:
+            state["signals"][tf] = sigs[tf]["action"]
         save_state(state)
         log.info("── Alerta enviada y estado guardado.")
     else:
@@ -398,3 +531,14 @@ def main():
 
 if __name__=="__main__":
     main()
+```
+
+### Así verás el mensaje ahora:
+```
+📡 ACTIVE RANGE — Cambio de senal
+━━━━━━━━━━━━━━━━━━━━
+🟢 Probabilidad de exito: 78%
+████████░░ Alta
+Direccion dominante: COMPRA 📈
+━━━━━━━━━━━━━━━━━━━━
+🟢 Confluencia: Alcista — 3/5 TFs...
