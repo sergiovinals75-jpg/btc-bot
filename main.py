@@ -531,10 +531,10 @@ def main():
 
 if __name__=="__main__":
     main()
-```
+
 
 ### Así verás el mensaje ahora:
-```
+
  ACTIVE RANGE  Cambio de senal
 
 "🟢" Probabilidad de exito: 78%
