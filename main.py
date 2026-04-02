@@ -31,7 +31,6 @@ TF_ORDER  = ["15m", "1h", "4h", "1d", "1w"]
 TF_LABELS = {"15m": "15M", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
 TF_LIMITS = {"15m": 500,   "1h": 500,  "4h": 300,  "1d": 200,  "1w": 100}
 
-# Peso de cada TF en el calculo de probabilidad (mayor TF = mas peso)
 TF_WEIGHTS = {"15m": 1, "1h": 2, "4h": 3, "1d": 4, "1w": 5}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -248,29 +247,13 @@ def compute_signal(candles_map, tf_key, current_price=None):
             "rsi":rsi,"atr":atr,"vol_ratio":vol_ratio,"range_state":last}
 
 
-# ─────────────────────────────────────────────
-# PROBABILIDAD DE EXITO
-# ─────────────────────────────────────────────
 def calc_probability(sigs):
-    """
-    Calcula probabilidad de exito ponderada por:
-    - Score normalizado de cada TF (pesos mayores a TFs mayores)
-    - Confluencia entre TFs
-    - Volumen
-    - RSI en zona correcta
-    - Retest confirmado
-    Devuelve: (prob_int, direccion, label, barra)
-    """
     if not sigs: return 50, "neutral", "Sin datos", "░░░░░░░░░░"
-
-    # Direccion dominante
     n_buy  = sum(1 for s in sigs.values() if s["css"] in ("buy",))
     n_sell = sum(1 for s in sigs.values() if s["css"] in ("sell",))
     if n_buy == 0 and n_sell == 0:
         return 50, "neutral", "Sin direccion clara", "░░░░░░░░░░"
     direction = "buy" if n_buy >= n_sell else "sell"
-
-    # Score ponderado por TF
     total_weight = 0
     weighted_score = 0
     for tf, s in sigs.items():
@@ -278,14 +261,10 @@ def calc_probability(sigs):
         total_weight += w
         max_s = s["max_s"] if s["max_s"] > 0 else 1
         norm = (s["tot"] + max_s) / (max_s * 2) * 100
-        # Si va en contra de la direccion dominante penalizar
         if direction == "buy"  and s["css"] == "sell": norm = 100 - norm
         if direction == "sell" and s["css"] == "buy":  norm = 100 - norm
         weighted_score += norm * w
-
     prob = weighted_score / total_weight if total_weight > 0 else 50
-
-    # Bonus/penalizacion por volumen (max +-6 puntos)
     vol_adj = 0
     for s in sigs.values():
         vr = s.get("vol_ratio")
@@ -295,8 +274,6 @@ def calc_probability(sigs):
         elif vr < 0.8:  vol_adj -= 2
     vol_adj = max(-6, min(6, vol_adj))
     prob += vol_adj
-
-    # Bonus por RSI en zona correcta (max +-4 puntos)
     rsi_adj = 0
     for s in sigs.values():
         rsi = s.get("rsi")
@@ -311,36 +288,24 @@ def calc_probability(sigs):
             elif rsi < 30: rsi_adj -= 2
     rsi_adj = max(-4, min(4, rsi_adj))
     prob += rsi_adj
-
-    # Bonus por retest confirmado (el mejor escenario posible)
     for s in sigs.values():
         rs = s.get("range_state", {})
         if direction == "buy"  and rs.get("retest_buy"):  prob += 5; break
         if direction == "sell" and rs.get("retest_sell"): prob += 5; break
-
-    # Penalizacion por divergencia entre TFs
     if n_buy > 0 and n_sell > 0:
         prob -= min(n_buy, n_sell) * 3
-
-    # Clamp entre 10% y 95%
     prob = max(10, min(95, round(prob)))
-
-    # Etiqueta
     if   prob >= 80: label = "Muy Alta"
     elif prob >= 65: label = "Alta"
     elif prob >= 50: label = "Media"
     elif prob >= 35: label = "Baja"
     else:            label = "Muy Baja"
-
-    # Barra visual (10 bloques)
     filled = round(prob / 10)
     barra  = "█" * filled + "░" * (10 - filled)
-
     return prob, direction, label, barra
 
 
 def prob_header(sigs):
-    """Bloque de probabilidad para poner al inicio del mensaje."""
     prob, direction, label, barra = calc_probability(sigs)
     if   prob >= 80: em = "🟢"
     elif prob >= 65: em = "🟡"
@@ -376,8 +341,10 @@ def fetch_all_candles():
         limit = TF_LIMITS[tf]
         r=requests.get(BINANCE_URL,params={"symbol":"BTCUSDT","interval":tf,"limit":limit},timeout=15)
         r.raise_for_status()
-        data[tf]=[{"ts":int(k[0]),"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])} for k in r.json()]
-        log.info(f"  {TF_LABELS[tf]}: {len(data[tf])} velas")
+        # [:-1] excluye la vela actual abierta, igual que Pine Script
+        # [:-1] excluye la vela actual abierta, igual que Pine Script
+        data[tf]=[{"ts":int(k[0]),"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])} for k in r.json()[:-1]]
+        log.info(f"  {TF_LABELS[tf]}: {len(data[tf])} velas (cerradas)")
     return data
 
 def tg_send(text):
@@ -463,7 +430,7 @@ def main():
     last_daily   = state.get("last_daily")
     log.info(f"Estado previo: {last_signals}")
 
-    log.info("── Descargando velas Binance...")
+    log.info("── Descargando velas Binance (solo cerradas)...")
     try:
         candles_map = fetch_all_candles()
     except Exception as e:
@@ -488,11 +455,9 @@ def main():
         except Exception as e:
             log.error(f"  Error calculando {TF_LABELS[tf]}: {e}")
 
-    # Log probabilidad
     prob, direction, label, _ = calc_probability(sigs)
     log.info(f"── Probabilidad: {prob}% ({label}) direccion={direction}")
 
-    # Detectar cambios en TODOS los timeframes
     changed=[]
     for tf in TF_ORDER:
         if tf in sigs:
@@ -531,6 +496,3 @@ def main():
 
 if __name__=="__main__":
     main()
-
-
-
