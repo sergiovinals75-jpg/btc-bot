@@ -535,7 +535,7 @@ if __name__=="__main__":
 
 ### Así verás el mensaje ahora:
 
- ACTIVE RANGE  Cambio de senal
+ACTIVE RANGE    Cambio de senal
 
 "🟢" Probabilidad de exito: 78%
 " ████████░░ " Alta
