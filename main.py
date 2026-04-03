@@ -4,6 +4,7 @@ Se ejecuta cada 5 minutos. Envia alerta si cambia la senal.
 Envia resumen diario a las 9:00h hora Espana.
 
 Secrets: TG_TOKEN, TG_CHAT_ID
+Opcional: MODE  →  conservador | equilibrado | agresivo  (por defecto: equilibrado)
 """
 
 import os
@@ -16,6 +17,7 @@ from pathlib import Path
 
 TG_TOKEN   = os.environ.get("TG_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
+MODE       = os.environ.get("MODE", "equilibrado").lower()   # ← NUEVO
 STATE_FILE = Path("state.json")
 BINANCE_URL  = "https://data-api.binance.vision/api/v3/klines"
 BINANCE_TICK = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -30,11 +32,85 @@ VOL_PERIOD  = 20
 TF_ORDER  = ["15m", "1h", "4h", "1d", "1w"]
 TF_LABELS = {"15m": "15M", "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"}
 TF_LIMITS = {"15m": 500,   "1h": 500,  "4h": 300,  "1d": 200,  "1w": 100}
-
 TF_WEIGHTS = {"15m": 1, "1h": 2, "4h": 3, "1d": 4, "1w": 5}
+
+# ─── CONFIGURACIONES DE MODO ─────────────────────────────────────────────────
+# Cada modo ajusta 6 grupos de parámetros:
+#   thr          → score mínimo para señal fuerte (COMPRA / VENDE)
+#   retest_tot   → score mínimo cuando hay retest confirmado (más laxo)
+#   rsi_*        → umbrales RSI para cada banda de scoring
+#   vol_*        → ratios de volumen para confirmación
+#   mtf_*        → % de TFs alineados para alineación fuerte/parcial
+#   sl_atr/tp_atr→ multiplicador ATR para Stop Loss y Take Profit
+#   allow_weak   → si False, suprime señales COMPRA/VENDE DÉBIL
+
+MODES = {
+    "conservador": {
+        "label": "Conservador 🛡️",
+        "thr": 7,             # score alto: muy pocas señales
+        "retest_tot": 5,      # con retest necesita score ≥ 5
+        "rsi_oversold": 35,   # RSI < 35 → sobreventa extrema (+3)
+        "rsi_buy": 42,        # RSI < 42 → presión compradora (+2)
+        "rsi_neutral_hi": 58, # RSI < 58 → neutral (0)
+        "rsi_sell": 72,       # RSI < 72 → precaución (-1)
+        "rsi_overbought": 78, # RSI ≥ 78 → sobrecompra extrema (-3)
+        "vol_strong": 1.8,    # vol × 1.8 → confirmación fuerte (+2)
+        "vol_good": 1.3,      # vol × 1.3 → confirmación moderada (+1)
+        "vol_weak": 0.8,      # vol < 0.8 → señal débil (-1)
+        "mtf_strong": 0.85,   # ≥ 85% TFs alineados → +2
+        "mtf_medium": 0.65,   # ≥ 65% TFs alineados → +1
+        "sl_atr": 1.5,        # SL = precio ± ATR × 1.5
+        "tp_atr": 2.5,        # TP = precio ± ATR × 2.5  →  R:R 1.6:1
+        "allow_weak": False,  # sin señales débiles
+    },
+    "equilibrado": {
+        "label": "Equilibrado ⚖️",
+        "thr": 5,
+        "retest_tot": 3,
+        "rsi_oversold": 30,
+        "rsi_buy": 45,
+        "rsi_neutral_hi": 55,
+        "rsi_sell": 55,
+        "rsi_overbought": 80,
+        "vol_strong": 1.5,
+        "vol_good": 1.2,
+        "vol_weak": 0.8,
+        "mtf_strong": 0.75,
+        "mtf_medium": 0.50,
+        "sl_atr": 1.0,
+        "tp_atr": 1.5,        # R:R 1.5:1
+        "allow_weak": True,
+    },
+    "agresivo": {
+        "label": "Agresivo ⚡",
+        "thr": 3,             # score bajo: muchas más señales
+        "retest_tot": 1,      # con retest basta score ≥ 1
+        "rsi_oversold": 38,   # RSI < 38 → sobreventa extrema (+3)
+        "rsi_buy": 55,        # RSI < 55 → presión compradora (+2) ← muy permisivo
+        "rsi_neutral_hi": 52, # RSI < 52 → neutral (0)
+        "rsi_sell": 50,       # RSI < 50 → precaución (-1)
+        "rsi_overbought": 75, # RSI ≥ 75 → sobrecompra extrema (-3)
+        "vol_strong": 1.2,    # vol × 1.2 → confirmación fuerte
+        "vol_good": 1.0,      # vol × 1.0 → confirmación moderada
+        "vol_weak": 0.7,      # vol < 0.7 → señal débil
+        "mtf_strong": 0.50,   # ≥ 50% TFs alineados → +2
+        "mtf_medium": 0.30,   # ≥ 30% TFs alineados → +1
+        "sl_atr": 0.7,        # SL ajustado, stops más ceñidos
+        "tp_atr": 1.0,        # R:R 1.4:1
+        "allow_weak": True,
+    },
+}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger(__name__)
+
+
+def get_cfg():
+    """Devuelve la configuración del modo activo, con fallback a equilibrado."""
+    if MODE not in MODES:
+        log.warning(f"Modo '{MODE}' desconocido, usando 'equilibrado'.")
+        return MODES["equilibrado"]
+    return MODES[MODE]
 
 
 def load_state():
@@ -169,7 +245,11 @@ def fetch_current_price():
         log.warning(f"No se pudo obtener precio actual: {e}")
         return None
 
-def compute_signal(candles_map, tf_key, current_price=None):
+
+def compute_signal(candles_map, tf_key, cfg, current_price=None):
+    """
+    Calcula la señal para un timeframe dado usando la configuración de modo (cfg).
+    """
     candles = candles_map.get(tf_key)
     if not candles or len(candles) < LEN_RANGE+5: return None
     closes = [c["close"] for c in candles]
@@ -181,9 +261,12 @@ def compute_signal(candles_map, tf_key, current_price=None):
     vol_ratio = calc_volume_ratio(candles)
     sc=[]; tot=0
 
-    def add(name,s,ms,label,color):
-        nonlocal tot; sc.append({"name":name,"score":s,"max":ms,"label":label,"color":color}); tot+=s
+    def add(name, s, ms, label, color):
+        nonlocal tot
+        sc.append({"name":name,"score":s,"max":ms,"label":label,"color":color})
+        tot += s
 
+    # 1. ZONA — lógica de rango activo (idéntica en todos los modos)
     if last["in"] and last["hi"]:
         if   last["phase"]==1 and last["retest_buy"]:  add("Zona",3,3,"Retest COMPRA confirmado","green")
         elif last["phase"]==1 and last["went_below"]:  add("Zona",2,3,"Toco zona baja","green")
@@ -192,56 +275,70 @@ def compute_signal(candles_map, tf_key, current_price=None):
         elif last["phase"]==2 and last["went_above"]:  add("Zona",-2,3,"Toco zona alta","red")
         elif last["phase"]==2:                          add("Zona",-1,3,"Fase bajista","red")
         else:                                           add("Zona",0,3,"Sin fase","yellow")
-    else: add("Zona",0,3,"Sin rango activo","yellow")
+    else:
+        add("Zona",0,3,"Sin rango activo","yellow")
 
+    # 2. RSI — umbrales según modo
     if rsi is not None:
-        if   rsi<30:  add("RSI",3,3,f"RSI {rsi:.1f} Sobreventa extrema","green")
-        elif rsi<45:  add("RSI",2,3,f"RSI {rsi:.1f} Presion compradora","green")
-        elif rsi<55:  add("RSI",0,3,f"RSI {rsi:.1f} Neutral","yellow")
-        elif rsi<70:  add("RSI",-1,3,f"RSI {rsi:.1f} Precaucion","yellow")
-        elif rsi<80:  add("RSI",-2,3,f"RSI {rsi:.1f} Sobrecompra","red")
-        else:         add("RSI",-3,3,f"RSI {rsi:.1f} Sobrecompra extrema","red")
+        if   rsi < cfg["rsi_oversold"]:   add("RSI", 3,3,f"RSI {rsi:.1f} Sobreventa extrema","green")
+        elif rsi < cfg["rsi_buy"]:         add("RSI", 2,3,f"RSI {rsi:.1f} Presion compradora","green")
+        elif rsi < cfg["rsi_neutral_hi"]: add("RSI", 0,3,f"RSI {rsi:.1f} Neutral","yellow")
+        elif rsi < cfg["rsi_sell"]:        add("RSI",-1,3,f"RSI {rsi:.1f} Precaucion","yellow")
+        elif rsi < cfg["rsi_overbought"]: add("RSI",-2,3,f"RSI {rsi:.1f} Sobrecompra","red")
+        else:                              add("RSI",-3,3,f"RSI {rsi:.1f} Sobrecompra extrema","red")
 
+    # 3. VOLUMEN — umbrales según modo
     if vol_ratio is not None:
         cur_bias = 1 if last["phase"]==1 else (-1 if last["phase"]==2 else 0)
-        if vol_ratio >= 1.5:
-            if cur_bias != 0: add("Vol",2,2,f"Volumen {vol_ratio:.1f}x Confirma movimiento","green")
-            else:             add("Vol",1,2,f"Volumen {vol_ratio:.1f}x Alto sin sesgo","yellow")
-        elif vol_ratio >= 1.2: add("Vol",1,2,f"Volumen {vol_ratio:.1f}x Por encima media","green")
-        elif vol_ratio < 0.8 and last["in"]: add("Vol",-1,2,f"Volumen {vol_ratio:.1f}x Bajo senal debil","red")
-        else: add("Vol",0,2,f"Volumen {vol_ratio:.1f}x Normal","yellow")
+        if vol_ratio >= cfg["vol_strong"]:
+            if cur_bias != 0: add("Vol", 2,2,f"Volumen {vol_ratio:.1f}x Confirma movimiento","green")
+            else:             add("Vol", 1,2,f"Volumen {vol_ratio:.1f}x Alto sin sesgo","yellow")
+        elif vol_ratio >= cfg["vol_good"]:
+            add("Vol",1,2,f"Volumen {vol_ratio:.1f}x Por encima media","green")
+        elif vol_ratio < cfg["vol_weak"] and last["in"]:
+            add("Vol",-1,2,f"Volumen {vol_ratio:.1f}x Bajo senal debil","red")
+        else:
+            add("Vol",0,2,f"Volumen {vol_ratio:.1f}x Normal","yellow")
 
+    # 4. MTF — % de alineación según modo
     biases   = [calc_bias(v) for k,v in candles_map.items() if k in TF_LABELS]
     cur_bias = 1 if last["phase"]==1 else (-1 if last["phase"]==2 else 0)
     active_b = [b for b in biases if b["bias"]!=0]
     aligned  = sum(1 for b in active_b if b["bias"]==cur_bias)
     if active_b:
-        ratio = aligned/len(active_b)
-        if   ratio>=0.75: add("MTF",2,2,f"{aligned}/{len(active_b)} TFs alineados","green")
-        elif ratio>=0.5:  add("MTF",1,2,"Alineacion parcial","yellow")
-        elif ratio==0:    add("MTF",-2,2,"Divergencia MTF","red")
-        else:             add("MTF",-1,2,"Alineacion debil","yellow")
+        ratio = aligned / len(active_b)
+        if   ratio >= cfg["mtf_strong"]: add("MTF", 2,2,f"{aligned}/{len(active_b)} TFs alineados","green")
+        elif ratio >= cfg["mtf_medium"]: add("MTF", 1,2,"Alineacion parcial","yellow")
+        elif ratio == 0:                  add("MTF",-2,2,"Divergencia MTF","red")
+        else:                             add("MTF",-1,2,"Alineacion debil","yellow")
 
+    # 5. CONTEXTO + FUERZA (igual en todos los modos)
     if last["in"]:
-        add("Contexto",1 if last["is_cont"] else -1,1,"Continuacion" if last["is_cont"] else "Posible reversion","green")
+        add("Contexto",1 if last["is_cont"] else -1,1,
+            "Continuacion" if last["is_cont"] else "Posible reversion","green")
         touches = last["touches_lo"] if last["phase"]==1 else last["touches_hi"]
-        if   touches>=3: add("Fuerza",2,2,f"Zona testeada {touches}x","green")
-        elif touches==2: add("Fuerza",1,2,"Zona confirmada 2 toques","green")
-        else:            add("Fuerza",0,2,"Zona sin confirmar","yellow")
+        if   touches >= 3: add("Fuerza", 2,2,f"Zona testeada {touches}x","green")
+        elif touches == 2: add("Fuerza", 1,2,"Zona confirmada 2 toques","green")
+        else:              add("Fuerza", 0,2,"Zona sin confirmar","yellow")
 
-    max_s = sum(x["max"] for x in sc)
-    thr   = 5
+    # ─── DECISIÓN DE SEÑAL ──────────────────────────────────────────────────
+    zona_score = next((x["score"] for x in sc if x["name"]=="Zona"), 0)
+    max_s      = sum(x["max"] for x in sc)
+    thr        = cfg["thr"]
+    weak_thr   = math.ceil(thr / 2)
     rb = last["in"] and last["phase"]==1 and last["retest_buy"]
     rs = last["in"] and last["phase"]==2 and last["retest_sell"]
 
-    if   rb and tot>=3:             action,css = "COMPRA","buy"
-    elif tot>=thr:                  action,css = "COMPRA","buy"
-    elif tot>=math.ceil(thr/2):     action,css = "COMPRA DEBIL","buy"
-    elif rs and tot<=-3:            action,css = "VENDE","sell"
-    elif tot<=-thr:                 action,css = "VENDE","sell"
-    elif tot<=-math.ceil(thr/2):    action,css = "VENDE DEBIL","sell"
-    elif not last["in"]:            action,css = "SIN RANGO","wait"
-    else:                           action,css = "ESPERA","neutral"
+    if   rb and tot >= cfg["retest_tot"] and zona_score > 0: action, css = "COMPRA", "buy"
+    elif tot >= thr and zona_score > 0:                       action, css = "COMPRA", "buy"
+    elif cfg["allow_weak"] and tot >= weak_thr and zona_score > 0:
+                                                              action, css = "COMPRA DEBIL", "buy"
+    elif rs and tot <= -cfg["retest_tot"] and zona_score < 0: action, css = "VENDE", "sell"
+    elif tot <= -thr and zona_score < 0:                      action, css = "VENDE", "sell"
+    elif cfg["allow_weak"] and tot <= -weak_thr and zona_score < 0:
+                                                              action, css = "VENDE DEBIL", "sell"
+    elif not last["in"]:                                      action, css = "SIN RANGO", "wait"
+    else:                                                     action, css = "ESPERA", "neutral"
 
     return {"action":action,"css":css,"tot":tot,"max_s":max_s,"price":price,
             "rsi":rsi,"atr":atr,"vol_ratio":vol_ratio,"range_state":last}
@@ -249,16 +346,14 @@ def compute_signal(candles_map, tf_key, current_price=None):
 
 def calc_probability(sigs):
     if not sigs: return 50, "neutral", "Sin datos", "░░░░░░░░░░"
-    n_buy  = sum(1 for s in sigs.values() if s["css"] in ("buy",))
-    n_sell = sum(1 for s in sigs.values() if s["css"] in ("sell",))
+    n_buy  = sum(1 for s in sigs.values() if s["css"] == "buy")
+    n_sell = sum(1 for s in sigs.values() if s["css"] == "sell")
     if n_buy == 0 and n_sell == 0:
         return 50, "neutral", "Sin direccion clara", "░░░░░░░░░░"
     direction = "buy" if n_buy >= n_sell else "sell"
-    total_weight = 0
-    weighted_score = 0
+    total_weight = 0; weighted_score = 0
     for tf, s in sigs.items():
-        w = TF_WEIGHTS.get(tf, 1)
-        total_weight += w
+        w = TF_WEIGHTS.get(tf, 1); total_weight += w
         max_s = s["max_s"] if s["max_s"] > 0 else 1
         norm = (s["tot"] + max_s) / (max_s * 2) * 100
         if direction == "buy"  and s["css"] == "sell": norm = 100 - norm
@@ -272,8 +367,7 @@ def calc_probability(sigs):
         if   vr >= 1.5: vol_adj += 2
         elif vr >= 1.2: vol_adj += 1
         elif vr < 0.8:  vol_adj -= 2
-    vol_adj = max(-6, min(6, vol_adj))
-    prob += vol_adj
+    prob += max(-6, min(6, vol_adj))
     rsi_adj = 0
     for s in sigs.values():
         rsi = s.get("rsi")
@@ -286,8 +380,7 @@ def calc_probability(sigs):
             if   rsi > 70: rsi_adj += 2
             elif rsi > 55: rsi_adj += 1
             elif rsi < 30: rsi_adj -= 2
-    rsi_adj = max(-4, min(4, rsi_adj))
-    prob += rsi_adj
+    prob += max(-4, min(4, rsi_adj))
     for s in sigs.values():
         rs = s.get("range_state", {})
         if direction == "buy"  and rs.get("retest_buy"):  prob += 5; break
@@ -300,17 +393,13 @@ def calc_probability(sigs):
     elif prob >= 50: label = "Media"
     elif prob >= 35: label = "Baja"
     else:            label = "Muy Baja"
-    filled = round(prob / 10)
-    barra  = "█" * filled + "░" * (10 - filled)
+    barra = "█" * round(prob / 10) + "░" * (10 - round(prob / 10))
     return prob, direction, label, barra
 
 
 def prob_header(sigs):
     prob, direction, label, barra = calc_probability(sigs)
-    if   prob >= 80: em = "🟢"
-    elif prob >= 65: em = "🟡"
-    elif prob >= 50: em = "🟠"
-    else:            em = "🔴"
+    em = "🟢" if prob >= 80 else ("🟡" if prob >= 65 else ("🟠" if prob >= 50 else "🔴"))
     dir_txt = "COMPRA 📈" if direction == "buy" else ("VENTA 📉" if direction == "sell" else "NEUTRAL")
     return (f"{em} <b>Probabilidad de exito: {prob}%</b>\n"
             f"<code>{barra}</code> {label}\n"
@@ -326,23 +415,20 @@ def calc_confluence(sigs):
         elif c=="wait": n_none+=1
         else: n_wait+=1
     total=len(sigs)
-    if n_buy>=4:               return "🟢🟢",f"ALCISTA FUERTE — {n_buy}/{total} TFs en compra",n_buy,n_sell,n_wait,n_none
-    elif n_buy>=3:             return "🟢",f"Alcista — {n_buy}/{total} TFs en compra",n_buy,n_sell,n_wait,n_none
-    elif n_sell>=4:            return "🔴🔴",f"BAJISTA FUERTE — {n_sell}/{total} TFs en venta",n_buy,n_sell,n_wait,n_none
-    elif n_sell>=3:            return "🔴",f"Bajista — {n_sell}/{total} TFs en venta",n_buy,n_sell,n_wait,n_none
-    elif n_buy>0 and n_sell>0: return "⚠️",f"Divergencia — {n_buy} compra vs {n_sell} venta",n_buy,n_sell,n_wait,n_none
-    elif n_wait>=3:            return "🟡",f"Sin direccion clara — {n_wait}/{total} en espera",n_buy,n_sell,n_wait,n_none
-    else:                      return "⬜","Sin rango activo en la mayoria de TFs",n_buy,n_sell,n_wait,n_none
+    if   n_buy>=4:               return "🟢🟢",f"ALCISTA FUERTE — {n_buy}/{total} TFs en compra",n_buy,n_sell,n_wait,n_none
+    elif n_buy>=3:               return "🟢",f"Alcista — {n_buy}/{total} TFs en compra",n_buy,n_sell,n_wait,n_none
+    elif n_sell>=4:              return "🔴🔴",f"BAJISTA FUERTE — {n_sell}/{total} TFs en venta",n_buy,n_sell,n_wait,n_none
+    elif n_sell>=3:              return "🔴",f"Bajista — {n_sell}/{total} TFs en venta",n_buy,n_sell,n_wait,n_none
+    elif n_buy>0 and n_sell>0:  return "⚠️",f"Divergencia — {n_buy} compra vs {n_sell} venta",n_buy,n_sell,n_wait,n_none
+    elif n_wait>=3:              return "🟡",f"Sin direccion clara — {n_wait}/{total} en espera",n_buy,n_sell,n_wait,n_none
+    else:                        return "⬜","Sin rango activo en la mayoria de TFs",n_buy,n_sell,n_wait,n_none
 
 
 def fetch_all_candles():
     data={}
     for tf in TF_ORDER:
-        limit = TF_LIMITS[tf]
-        r=requests.get(BINANCE_URL,params={"symbol":"BTCUSDT","interval":tf,"limit":limit},timeout=15)
+        r=requests.get(BINANCE_URL,params={"symbol":"BTCUSDT","interval":tf,"limit":TF_LIMITS[tf]},timeout=15)
         r.raise_for_status()
-        # [:-1] excluye la vela actual abierta, igual que Pine Script
-        # [:-1] excluye la vela actual abierta, igual que Pine Script
         data[tf]=[{"ts":int(k[0]),"open":float(k[1]),"high":float(k[2]),"low":float(k[3]),"close":float(k[4]),"volume":float(k[5])} for k in r.json()[:-1]]
         log.info(f"  {TF_LABELS[tf]}: {len(data[tf])} velas (cerradas)")
     return data
@@ -362,7 +448,7 @@ def vol_emoji(vol_ratio):
     if vol_ratio < 0.8:   return " ⬇️"
     return ""
 
-def build_tf_block(tf, s):
+def build_tf_block(tf, s, cfg):
     em={"buy":"🟢","sell":"🔴","wait":"⬜","neutral":"🟡"}.get(s["css"],"🟡")
     rsi_txt=f" · RSI {s['rsi']:.0f}" if s["rsi"] is not None else ""
     rng_txt=" · Rango ACTIVO" if s["range_state"]["in"] else ""
@@ -370,12 +456,15 @@ def build_tf_block(tf, s):
     price_f=fmt_price(s["price"])
     if s["atr"] and s["css"] in ("buy","sell"):
         is_buy=s["css"]=="buy"
-        sl=s["price"]-s["atr"] if is_buy else s["price"]+s["atr"]
-        tp=s["price"]+s["atr"]*1.5 if is_buy else s["price"]-s["atr"]*1.5
+        sl = s["price"] - s["atr"]*cfg["sl_atr"] if is_buy else s["price"] + s["atr"]*cfg["sl_atr"]
+        tp = s["price"] + s["atr"]*cfg["tp_atr"] if is_buy else s["price"] - s["atr"]*cfg["tp_atr"]
         sl_pct=abs(sl-s["price"])/s["price"]*100
         tp_pct=abs(tp-s["price"])/s["price"]*100
+        rr = cfg["tp_atr"] / cfg["sl_atr"]
         ds="-" if is_buy else "+"; dt="+" if is_buy else "-"
-        lvls=f"   🛑 SL: ${round(sl):,} ({ds}{sl_pct:.2f}%)\n   🎯 TP: ${round(tp):,} ({dt}{tp_pct:.2f}%)".replace(",",".")
+        lvls=(f"   🛑 SL: ${round(sl):,} ({ds}{sl_pct:.2f}%)\n"
+              f"   🎯 TP: ${round(tp):,} ({dt}{tp_pct:.2f}%)\n"
+              f"   📐 R:R {rr:.1f}:1 · SL×{cfg['sl_atr']} TP×{cfg['tp_atr']} ATR").replace(",",".")
     else:
         lvls="   🟡 Sin niveles activos"
     rs=s["range_state"]
@@ -384,14 +473,14 @@ def build_tf_block(tf, s):
             f"   💰 Precio: <b>${price_f}</b>\n"
             f"{rng_line}{lvls}")
 
-def build_alert_message(sigs, changed_tfs):
-    fecha  = now_spain().strftime("%d/%m %H:%M") + "h"
+def build_alert_message(sigs, changed_tfs, cfg):
+    fecha   = now_spain().strftime("%d/%m %H:%M") + "h"
     changed = ", ".join(TF_LABELS[t] for t in TF_ORDER if t in changed_tfs)
     conf_em,conf_txt,n_buy,n_sell,n_wait,n_none = calc_confluence(sigs)
-    blocks = [build_tf_block(tf,sigs[tf]) for tf in TF_ORDER if sigs.get(tf)]
+    blocks  = [build_tf_block(tf,sigs[tf],cfg) for tf in TF_ORDER if sigs.get(tf)]
     return (
         f"📡 <b>ACTIVE RANGE — Cambio de senal</b>\n"
-        f"<i>Cambiaron: {changed}</i>\n"
+        f"<i>Modo: {cfg['label']} · Cambiaron: {changed}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{prob_header(sigs)}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -402,13 +491,13 @@ def build_alert_message(sigs, changed_tfs):
         + f"\n━━━━━━━━━━━━━━━━━━━━\n<i>Hora Espana: {fecha}</i>"
     )
 
-def build_daily_message(sigs):
+def build_daily_message(sigs, cfg):
     fecha = now_spain().strftime("%d/%m/%Y")
     conf_em,conf_txt,n_buy,n_sell,n_wait,n_none = calc_confluence(sigs)
-    blocks = [build_tf_block(tf,sigs[tf]) for tf in TF_ORDER if sigs.get(tf)]
+    blocks = [build_tf_block(tf,sigs[tf],cfg) for tf in TF_ORDER if sigs.get(tf)]
     return (
         f"☀️ <b>RESUMEN DIARIO — {fecha}</b>\n"
-        f"<i>BTC Active Range Bot · 9:00h Espana</i>\n"
+        f"<i>BTC Active Range Bot · 9:00h Espana · Modo: {cfg['label']}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"{prob_header(sigs)}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -424,6 +513,9 @@ def main():
     log.info("── BTC Active Range Bot — inicio")
     if not TG_TOKEN or not TG_CHAT_ID:
         log.error("Faltan TG_TOKEN y/o TG_CHAT_ID"); return
+
+    cfg = get_cfg()
+    log.info(f"── Modo activo: {cfg['label']}  (umbral={cfg['thr']}, weak={cfg['allow_weak']})")
 
     state        = load_state()
     last_signals = state["signals"]
@@ -447,7 +539,7 @@ def main():
     sigs={}
     for tf in TF_ORDER:
         try:
-            s=compute_signal(candles_map, tf, current_price)
+            s = compute_signal(candles_map, tf, cfg, current_price)
             if s:
                 sigs[tf]=s
                 vol_info=f"  Vol:{s['vol_ratio']:.2f}x" if s.get("vol_ratio") else ""
@@ -473,7 +565,7 @@ def main():
 
     if now_es.hour==DAILY_HOUR and last_daily!=today_str:
         log.info("── Enviando resumen diario...")
-        if tg_send(build_daily_message(sigs)):
+        if tg_send(build_daily_message(sigs, cfg)):
             state["last_daily"]=today_str; sent_daily=True
             log.info("── Resumen diario enviado.")
         else:
@@ -485,7 +577,7 @@ def main():
         return
 
     log.info(f"── Cambios detectados en: {[TF_LABELS[t] for t in changed]}")
-    if tg_send(build_alert_message(sigs, changed)):
+    if tg_send(build_alert_message(sigs, changed, cfg)):
         for tf in changed:
             state["signals"][tf] = sigs[tf]["action"]
         save_state(state)
