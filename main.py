@@ -17,7 +17,7 @@ from pathlib import Path
 
 TG_TOKEN   = os.environ.get("TG_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
-MODE       = os.environ.get("MODE", "equilibrado").lower()   # ← NUEVO
+MODE       = os.environ.get("MODE", "agresivo").lower()   # ← NUEVO
 STATE_FILE = Path("state.json")
 BINANCE_URL  = "https://data-api.binance.vision/api/v3/klines"
 BINANCE_TICK = "https://data-api.binance.vision/api/v3/ticker/price"
