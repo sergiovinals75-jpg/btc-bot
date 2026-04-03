@@ -118,15 +118,20 @@ def load_state():
         try:
             d = json.loads(STATE_FILE.read_text())
             if "signals" in d:
+                # Si el modo cambió, resetea las señales guardadas
+                if d.get("mode") != MODE:
+                    log.info(f"Modo cambió ({d.get('mode')} → {MODE}), reseteando señales.")
+                    return {"signals": {tf: None for tf in TF_ORDER}, "last_daily": None, "mode": MODE}
                 for tf in TF_ORDER:
                     d["signals"].setdefault(tf, None)
                 return d
-            return {"signals": {tf: None for tf in TF_ORDER}, "last_daily": None}
+            return {"signals": {tf: None for tf in TF_ORDER}, "last_daily": None, "mode": MODE}
         except Exception:
             pass
-    return {"signals": {tf: None for tf in TF_ORDER}, "last_daily": None}
+    return {"signals": {tf: None for tf in TF_ORDER}, "last_daily": None, "mode": MODE}
 
 def save_state(state):
+    state["mode"] = MODE   # guarda el modo activo junto con las señales
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 def is_dst(dt):
