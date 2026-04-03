@@ -12,4 +12,4 @@ services:
 env:
   TG_TOKEN: ${{ secrets.TG_TOKEN }}
   TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-  MODE: agresivo          # ← aquí
+  MODE: ${{ secrets.MODE }}
