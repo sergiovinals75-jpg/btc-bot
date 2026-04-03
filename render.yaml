@@ -9,3 +9,7 @@ services:
         sync: false       # lo introduces tú a mano en el dashboard de Render
       - key: TG_CHAT_ID
         sync: false
+env:
+  TG_TOKEN: ${{ secrets.TG_TOKEN }}
+  TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+  MODE: agresivo          # ← aquí
