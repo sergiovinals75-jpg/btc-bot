@@ -1,10 +1,10 @@
 {
   "signals": {
-    "15m": "VENDE",
+    "15m": "ESPERA",
     "1h": "ESPERA",
     "4h": "SIN RANGO",
-    "1d": "COMPRA DEBIL",
+    "1d": "ESPERA",
     "1w": "ESPERA"
   },
-  "last_daily": null
+  "last_daily": "2026-04-03"
 }
