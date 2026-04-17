@@ -1,11 +1,11 @@
 {
   "signals": {
     "15m": "ESPERA",
-    "1h": "SIN RANGO",
+    "1h": "ESPERA",
     "4h": "VENDE",
     "1d": "SIN RANGO",
     "1w": "ESPERA"
   },
-  "last_daily": "2026-04-16",
+  "last_daily": "2026-04-17",
   "mode": "agresivo"
 }
