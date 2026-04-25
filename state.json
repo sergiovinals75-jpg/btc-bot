@@ -1,7 +1,7 @@
 {
   "signals": {
-    "15m": "ESPERA",
-    "1h": "ESPERA",
+    "15m": "SIN RANGO",
+    "1h": "SIN RANGO",
     "4h": "COMPRA",
     "1d": "ESPERA",
     "1w": "ESPERA"
