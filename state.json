@@ -2,7 +2,7 @@
   "signals": {
     "15m": "VENDE",
     "1h": "VENDE",
-    "4h": "ESPERA",
+    "4h": "VENDE",
     "1d": "ESPERA",
     "1w": "ESPERA"
   },
