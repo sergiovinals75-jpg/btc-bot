@@ -1,8 +1,8 @@
 {
   "signals": {
     "15m": "VENDE",
-    "1h": "ESPERA",
-    "4h": "COMPRA",
+    "1h": "VENDE DEBIL",
+    "4h": "ESPERA",
     "1d": "ESPERA",
     "1w": "ESPERA"
   },
