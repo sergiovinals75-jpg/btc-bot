@@ -1,9 +1,9 @@
 {
   "signals": {
     "15m": "ESPERA",
-    "1h": "VENDE",
+    "1h": "ESPERA",
     "4h": "ESPERA",
-    "1d": "VENDE",
+    "1d": "ESPERA",
     "1w": "ESPERA"
   },
   "last_daily": "2026-05-02",
