@@ -1,9 +1,9 @@
 {
   "signals": {
-    "15m": "SIN RANGO",
+    "15m": "VENDE",
     "1h": "COMPRA",
     "4h": "COMPRA",
-    "1d": "COMPRA",
+    "1d": "ESPERA",
     "1w": "ESPERA"
   },
   "last_daily": "2026-05-12",
